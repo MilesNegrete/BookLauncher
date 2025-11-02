@@ -1,5 +1,6 @@
 use crate::book::Book;
 use eframe::egui;
+use rfd::FileDialog;
 
 pub struct EbookApp {
     books: Vec<Book>,
@@ -25,6 +26,19 @@ impl eframe::App for EbookApp {
                     ui.label(format!("👤 {}", book.author));
                 });
                 ui.add_space(8.0);
+            }
+
+            if ui.button("Select File").clicked() {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("Ebook", &["epub", "json"])
+                    .pick_file()
+                {
+                    println!("Selected file: {:?}", path);
+                    // You could load it right away:
+                    if let Some(book) = Book::from_filename(&path) {
+                        self.books.push(book);
+                    }
+                }
             }
         });
     }
