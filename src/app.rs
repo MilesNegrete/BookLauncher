@@ -7,9 +7,9 @@ pub struct EbookApp {
 
 impl Default for EbookApp {
     fn default() -> Self {
-        Self {
-            books: Book::sample_books(),
-        }
+        let dir = std::path::Path::new("/home/mjnegrete/Downloads"); // <- set your folder
+        let books = Book::from_dir(dir).unwrap_or_else(|_| Book::sample_books());
+        Self { books }
     }
 }
 
