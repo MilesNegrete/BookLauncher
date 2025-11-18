@@ -20,13 +20,19 @@ impl eframe::App for EbookApp {
             ui.heading("📚 My E-Book Library");
             ui.separator();
 
-            for book in &self.books {
-                ui.group(|ui| {
-                    ui.label(format!("📖 {}", book.title));
-                    ui.label(format!("👤 {}", book.author));
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    for book in &self.books {
+                        ui.group(|ui| {
+                            ui.label(format!("📖 {}", book.title));
+                            ui.label(format!("👤 {}", book.author));
+                        });
+                        ui.add_space(8.0);
+                    }
                 });
-                ui.add_space(8.0);
-            }
+
+            ui.separator();
 
             if ui.button("Select File").clicked() {
                 if let Some(path) = FileDialog::new()
@@ -34,7 +40,7 @@ impl eframe::App for EbookApp {
                     .pick_file()
                 {
                     println!("Selected file: {:?}", path);
-                    // You could load it right away:
+
                     if let Some(book) = Book::from_filename(&path) {
                         self.books.push(book);
                     }
