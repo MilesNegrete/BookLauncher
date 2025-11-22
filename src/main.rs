@@ -1,7 +1,7 @@
 mod app;
 mod book;
 
-use app::EbookApp;
+use app::App;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -23,6 +23,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "E-Book Reader",
         options,
-        Box::new(|_| Ok(Box::<EbookApp>::default())),
+        Box::new(|_| Ok(Box::<App>::default())),
     )
 }
