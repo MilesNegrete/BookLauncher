@@ -8,6 +8,7 @@ use crate::book::Book;
 pub struct App {
     books: Vec<Book>,
     last_dir: Option<PathBuf>,
+    open_folder_picker: bool,
 }
 
 impl Default for App {
@@ -15,6 +16,7 @@ impl Default for App {
         Self {
             books: Vec::new(),
             last_dir: None,
+            open_folder_picker: false,
         }
     }
 }
@@ -55,25 +57,45 @@ impl eframe::App for App {
             if ui.button("Add Book (File)").clicked() {
                 if let Some(path) = FileDialog::new().pick_file() {
                     self.last_dir = path.parent().map(|p| p.to_path_buf());
-                    if let Err(e) = self.add_book_from_path(&path) {
-                        ui.label(format!("Error: {}", e));
-                    }
+                    let _ = self.add_book_from_path(&path);
                 }
             }
 
-            if let Some(folder) = FileDialog::new().pick_folder() {
-                self.last_dir = Some(folder.clone());
-                match self.scan_folder(&folder) {
-                    Ok(found) => {
-                        ui.label(format!("{} books found.", found.len()));
-                        for b in found {
-                            ui.label(b.title);
+            if ui.button("Select File").clicked() {
+                self.open_folder_picker = true;
+            }
+
+            if self.open_folder_picker {
+                if let Some(path) = FileDialog::new().pick_file() {
+                    self.last_dir = path.parent().map(|p| p.to_path_buf());
+                }
+                self.open_folder_picker = false;
+            }
+
+            if ui.button("Scan Folder").clicked() {
+                self.open_folder_picker = true;
+            }
+
+            if self.open_folder_picker {
+                if let Some(folder) = FileDialog::new().pick_folder() {
+                    self.last_dir = Some(folder.clone());
+
+                    match self.scan_folder(&folder) {
+                        Ok(found_books) => {
+                            for b in found_books {
+                                // push if not duplicate
+                                if !self.books.iter().any(|x| x.path == b.path) {
+                                    self.books.push(b);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            ui.label(format!("Error scanning: {}", e));
                         }
                     }
-                    Err(e) => {
-                        ui.label(format!("Error scanning: {}", e));
-                    }
                 }
+
+                self.open_folder_picker = false;
             }
         });
     }
