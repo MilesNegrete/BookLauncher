@@ -1,5 +1,6 @@
 mod app;
 mod book;
+mod database_maker;
 
 use app::App;
 

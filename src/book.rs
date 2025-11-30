@@ -1,36 +1,24 @@
+#![allow(unused_imports)]
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Clone)]
+/// Represents a book as used by the application.
+/// `id` is optional because new books scanned from the filesystem
+/// are not yet in the database until `add_to_database()` is called.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Book {
+    pub id: Option<i64>,
     pub title: String,
     pub author: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
+    pub path: PathBuf,
 }
 
 impl Book {
-    /// Simple convenience list so `app.rs` builds without needing the FS yet.
-    pub fn sample_books() -> Vec<Book> {
-        vec![
-            Book {
-                title: "The Hobbit".to_string(),
-                author: "J.R.R. Tolkien".to_string(),
-                path: None,
-            },
-            Book {
-                title: "Dune".to_string(),
-                author: "Frank Herbert".to_string(),
-                path: None,
-            },
-        ]
-    }
-
-    /// Create a Book from a filename, doing basic parsing for title/author.
-    /// Tries "Title - Author.ext" first; otherwise uses the stem as title and "Unknown" author.
+    /// Parse metadata from filename.
+    /// Format: "Title - Author.ext"
+    /// Falls back to "Unknown" author.
     pub fn from_filename(path: &Path) -> Option<Self> {
         let filename_stem = path.file_stem()?.to_string_lossy().to_string();
 
@@ -41,13 +29,14 @@ impl Book {
         };
 
         Some(Book {
+            id: None, // not in database yet
             title: title.replace('_', " "),
             author: author.replace('_', " "),
-            path: Some(path.to_path_buf()),
+            path: path.to_path_buf(),
         })
     }
 
-    /// Recursively scan a directory and collect all recognized book files.
+    /// Recursively scan a directory for supported book files.
     pub fn from_dir(dir: &Path) -> io::Result<Vec<Book>> {
         let mut books = Vec::new();
 
@@ -63,11 +52,9 @@ impl Book {
             let path = entry.path();
 
             if path.is_dir() {
-                // Recurse into subdirectories
                 books.extend(Self::from_dir(&path)?);
             } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 let ext = ext.to_lowercase();
-                // Add or remove extensions as you like
                 if ["epub", "mobi", "azw3", "pdf"].contains(&ext.as_str()) {
                     if let Some(book) = Book::from_filename(&path) {
                         books.push(book);
@@ -76,7 +63,7 @@ impl Book {
             }
         }
 
-        Ok(books) // <-- important: return the Vec
+        Ok(books)
     }
 }
 
@@ -91,6 +78,7 @@ mod tests {
         let book = Book::from_filename(&p).unwrap();
         assert_eq!(book.title, "The Lies of Locke Lamora");
         assert_eq!(book.author, "Scott Lynch");
-        assert_eq!(book.path.as_ref().unwrap(), &p);
+        assert_eq!(book.path, p);
+        assert!(book.id.is_none());
     }
 }
