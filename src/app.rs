@@ -1,10 +1,9 @@
 use crate::book::Book;
+use directories::ProjectDirs;
 use eframe::egui;
 use rfd::FileDialog;
-use std::path::PathBuf;
-use directories::ProjectDirs;
 use serde_json;
-
+use std::path::PathBuf;
 
 pub struct EbookApp {
     books: Vec<Book>,
@@ -74,6 +73,37 @@ impl eframe::App for EbookApp {
             ui.heading("📚 My E-Book Library");
             ui.separator();
 
+            for book in &self.books {
+                ui.group(|ui| {
+                    if ui
+                        .selectable_label(false, format!("📖 {}", book.title))
+                        .clicked()
+                    {
+                        if let Some(path) = &book.path {
+                            match open::that(path) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    eprintln!("Failed to open {}: {}", path.display(), e);
+                                }
+                            }
+                        } else {
+                            eprintln!("No path for book: {}", book.title);
+                        }
+                    }
+
+                    ui.label(format!("👤 {}", book.author));
+
+                    if let Some(p) = &book.path {
+                        ui.label(
+                            egui::RichText::new(format!("Path: {}", p.display()))
+                                .small()
+                                .weak(),
+                        );
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
             if ui.button("Choose Library Folder").clicked() {
                 if let Some(folder) = FileDialog::new().pick_folder() {
                     self.library_path = Some(folder.clone());
@@ -107,8 +137,37 @@ impl eframe::App for EbookApp {
                 .show(ui, |ui| {
                     for book in &self.books {
                         ui.group(|ui| {
-                            ui.label(format!("📖 {}", book.title));
+                            // Make the whole group clickable
+                            if ui
+                                .selectable_label(false, format!("📖 {}", book.title))
+                                .clicked()
+                            {
+                                if let Some(path) = &book.path {
+                                    match open::that(path) {
+                                        Ok(()) => {
+                                            // optionally: show a small toast / label "Opening..." ?
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to open {}: {}", path.display(), e);
+                                            // TODO: show error in UI (maybe add egui toast / modal later)
+                                        }
+                                    }
+                                } else {
+                                    // optional: handle books without path (samples)
+                                    eprintln!("No path for book: {}", book.title);
+                                }
+                            }
+
                             ui.label(format!("👤 {}", book.author));
+
+                            // optional: smaller metadata line
+                            if let Some(p) = &book.path {
+                                ui.label(
+                                    egui::RichText::new(format!("Path: {}", p.display()))
+                                        .small()
+                                        .weak(),
+                                );
+                            }
                         });
                         ui.add_space(8.0);
                     }
