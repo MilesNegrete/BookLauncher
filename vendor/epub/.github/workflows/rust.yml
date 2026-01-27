@@ -1,0 +1,32 @@
+name: Rust
+
+on:
+    workflow_dispatch:
+    push:
+        paths:
+            - "**/*.rs"
+            - "**/*.yml"
+            - "Cargo.toml"
+            - "**/*.epub"
+    pull_request:
+        paths:
+            - "**/*.rs"
+            - "**/*.yml"
+            - "Cargo.toml"
+            - "**/*.epub"
+
+jobs:
+    build:
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, ubuntu-latest, windows-latest]
+                rust: [stable, 1.85.0]
+        steps:
+            - uses: actions/checkout@v2
+            - uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: ${{ matrix.rust }}
+            - run: cargo build --verbose
+            - run: cargo test --verbose

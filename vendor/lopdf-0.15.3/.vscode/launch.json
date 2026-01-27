@@ -1,0 +1,39 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "test",
+			"program": "cargo",
+			"args": ["test", "replace"],
+			"cwd": "${workspaceRoot}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "lldb1",
+			"program": "./pdfutil/target/debug/pdfutil",
+			"args": [
+				"extract_text",
+				"1",
+				"-i",
+				"/Users/Junfeng/ZhimoProjects/zhimo-tiku-job-queue/output.pdf"
+			],
+			"cwd": "${workspaceRoot}"
+		},
+		{
+			"type": "lldb",
+			"request": "launch",
+			"name": "lldb",
+			"program": "./pdfutil/target/debug/pdfutil",
+			"args": [
+				"replace_text",
+				"1:Hello World!=>Modified text!",
+				"-i",
+				"/Users/Junfeng/Rust/lopdf/assets/example.pdf"
+			],
+			"cwd": "${workspaceRoot}"
+		}
+	]
+}

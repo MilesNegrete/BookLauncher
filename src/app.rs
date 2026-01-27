@@ -1,189 +1,259 @@
-use crate::book::Book;
-use directories::ProjectDirs;
 use eframe::egui;
 use rfd::FileDialog;
-use serde_json;
-use std::path::PathBuf;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
-pub struct EbookApp {
+// Use the Book from book.rs
+use crate::book::Book;
+
+//#[derive(Serialize, Clone)]
+pub struct App {
     books: Vec<Book>,
-    library_path: Option<PathBuf>,
+    last_dir: Option<PathBuf>,
+    open_folder_picker: bool,
+    scan_rx: Option<Receiver<io::Result<Vec<Book>>>>,
+    metadata_rx: Option<Receiver<BookUpdate>>,
+    metadata_tx: Option<Sender<BookUpdate>>,
+    done_threads: Vec<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct AppConfig {
-    library_path: Option<PathBuf>,
-    added_books: Vec<Book>,
+enum BookUpdate {
+    Update(PathBuf, String, String, Option<Vec<u8>>),
+    Done(String),
 }
 
-/// Creates a default instance of `EbookApp` by loading configuration from disk.
-///
-/// This implementation performs the following steps:
-/// 1. Determines the configuration directory using platform-specific paths via `ProjectDirs`
-/// 2. Attempts to read and parse `config.json` from the configuration directory
-/// 3. Loads previously added books and library path from the config if available
-/// 4. If no books are loaded from config:
-///    - Loads books from the configured library path on disk if set
-///    - Falls back to sample books if no library path is configured
-/// 5. Returns a new `EbookApp` instance with the loaded books and library path
-///
-/// # Behavior
-/// - Falls back to current directory (`.`) if platform-specific config directory cannot be determined
-/// - Silently ignores missing or invalid config files
-/// - Prioritizes explicit configuration over disk scanning
-/// - Provides sample books as a last resort to ensure the app is always usable
-impl Default for EbookApp {
+impl Default for App {
     fn default() -> Self {
-        let config_dir = ProjectDirs::from("", "", "BookLauncher")
-            .map(|proj| proj.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let config_path = config_dir.join("config.json");
-
-        let mut books = Vec::new();
-        let mut library_path: Option<PathBuf> = None;
-
-        if let Ok(txt) = std::fs::read_to_string(&config_path) {
-            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&txt) {
-                books = cfg.added_books;
-                library_path = cfg.library_path;
-            }
-        }
-
-        if books.is_empty() {
-            if let Some(dir) = &library_path {
-                if let Ok(from_disk) = Book::from_dir(dir) {
-                    books = from_disk;
-                }
-            } else {
-                books = Book::sample_books();
-            }
-        }
-
         Self {
-            books,
-            library_path,
+            books: Vec::new(),
+            last_dir: None,
+            open_folder_picker: false,
+            scan_rx: None,
+            metadata_rx: None,
+            metadata_tx: None,
+            done_threads: Vec::new(),
         }
     }
 }
 
-impl eframe::App for EbookApp {
+impl App {
+    fn add_book_from_path(&mut self, path: &Path) -> Result<(), String> {
+        match Book::from_filename(path) {
+            Some(book) => {
+                let already = self.books.iter().any(|b| b.path == book.path);
+                if !already {
+                    self.books.push(book);
+                    Ok(())
+                } else {
+                    Err("That book is already in your library.".to_string())
+                }
+            }
+            None => Err(format!("Couldn’t load: {}", path.display())),
+        }
+    }
+}
+
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("📚 My E-Book Library");
             ui.separator();
 
-            for book in &self.books {
-                ui.group(|ui| {
-                    if ui
-                        .selectable_label(false, format!("📖 {}", book.title))
-                        .clicked()
-                    {
-                        if let Some(path) = &book.path {
-                            match open::that(path) {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    eprintln!("Failed to open {}: {}", path.display(), e);
+            // Make the list scrollable
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(ui.available_height() - 100.0) // leave room for buttons
+                .show(ui, |ui| {
+                    if self.books.is_empty() {
+                        ui.label("No books yet. Add some using the buttons below.");
+                    } else {
+                        for book in &self.books {
+                            ui.horizontal(|ui| {
+                                // Show cover if available
+                                if let Some(cover) = &book.cover_bytes {
+                                    let image = egui::ColorImage::from_rgba_unmultiplied([100, 140], &cover.clone());
+                                    let texture = ctx.load_texture("book_cover", image, Default::default());
+                                    ui.image(&texture);
+                                } else {
+                                    // Placeholder
+                                    ui.label("[No cover]");
                                 }
-                            }
-                        } else {
-                            eprintln!("No path for book: {}", book.title);
+
+                                ui.vertical(|ui| {
+                                    ui.strong(&book.title);
+                                    ui.label(format!("by {}", book.author));
+                                    if let Some(path) = &book.path {
+                                        ui.label(path.display().to_string());
+                                    }
+                                });
+                            });
+                            ui.separator();
                         }
                     }
-
-                    ui.label(format!("👤 {}", book.author));
-
-                    if let Some(p) = &book.path {
-                        ui.label(
-                            egui::RichText::new(format!("Path: {}", p.display()))
-                                .small()
-                                .weak(),
-                        );
-                    }
                 });
-                ui.add_space(8.0);
+
+            ui.separator();
+
+            if ui.button("Scan Folder").clicked() {
+                self.open_folder_picker = true;
             }
 
-            if ui.button("Choose Library Folder").clicked() {
+            if self.open_folder_picker {
                 if let Some(folder) = FileDialog::new().pick_folder() {
-                    self.library_path = Some(folder.clone());
+                    self.last_dir = Some(folder.clone());
+                    let (tx, rx) = mpsc::channel();
+                    self.scan_rx = Some(rx);
+                    let folder_clone = folder.clone();
+                    thread::spawn(move || {
+                        let result = Book::from_dir(&folder_clone);
+                        tx.send(result).unwrap();
+                    });
+                    self.open_folder_picker = false;
+                }
+            }
 
-                    if let Ok(new_books) = Book::from_dir(&folder) {
-                        self.books = new_books;
-                    }
+            // Poll scan receiver
+            if let Some(rx) = &self.scan_rx {
+                if let Ok(result) = rx.try_recv() {
+                    self.scan_rx = None; // Clear receiver
+                    match result {
+                        Ok(found_books) => {
+                            // Thread 0: Count the number of books
+                            let count = found_books.len();
+                            // Could display count in UI if desired, e.g., ui.label(format!("Found {} books", count));
 
-                    // Save config
-                    let config = AppConfig {
-                        library_path: self.library_path.clone(),
-                        added_books: self.books.clone(),
-                    };
+                            // Thread 1: Sort the books based on type (group by extension)
+                            let mut groups: HashMap<String, Vec<Book>> = HashMap::new();
+                            for mut book in found_books {
+                                let ext = book
+                                    .path
+                                    .as_ref()
+                                    .and_then(|p| p.extension())
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s.to_lowercase())
+                                    .unwrap_or("unknown".to_string());
+                                groups.entry(ext).or_insert_with(Vec::new).push(book);
+                            }
 
-                    if let Some(proj) = ProjectDirs::from("", "", "BookLauncher") {
-                        let config_dir = proj.config_dir();
-                        let _ = std::fs::create_dir_all(config_dir);
-                        let config_path = config_dir.join("config.json");
+                            // Thread 2: Add the books to the library
+                            for (_, bs) in &groups {
+                                for book in bs {
+                                    if !self.books.iter().any(|x| x.path == book.path) {
+                                        self.books.push(book.clone());
+                                    }
+                                }
+                            }
+                            // UI will update with new books on next frame
 
-                        if let Ok(json) = serde_json::to_string_pretty(&config) {
-                            let _ = std::fs::write(&config_path, json);
+                            // Prepare for metadata extraction threads
+                            let (tx, rx) = mpsc::channel();
+                            self.metadata_rx = Some(rx);
+                            self.metadata_tx = Some(tx.clone());
+                            self.done_threads.clear();
+
+                            // Clone groups for threads
+                            let epubs = groups.get("epub").cloned().unwrap_or_default();
+                            let mobis = groups.get("mobi").cloned().unwrap_or_default();
+                            let azw3s = groups.get("azw3").cloned().unwrap_or_default();
+                            let pdfs = groups.get("pdf").cloned().unwrap_or_default();
+
+                            // Thread 3: Metadata extraction for epubs, then mobi/azw3
+                            let tx3 = tx.clone();
+                            thread::spawn(move || {
+                                // Epubs first
+                                for mut book in epubs {
+                                    let _ = book.extract_metadata();
+                                    tx3.send(BookUpdate::Update(
+                                        book.path.clone().unwrap(),
+                                        book.title.clone(),
+                                        book.author.clone(),
+                                        book.cover_bytes.clone(),
+                                    ))
+                                    .unwrap();
+                                }
+                                // Then mobi/azw3
+                                for mut book in mobis.into_iter().chain(azw3s.into_iter()) {
+                                    let _ = book.extract_metadata();
+                                    tx3.send(BookUpdate::Update(
+                                        book.path.clone().unwrap(),
+                                        book.title.clone(),
+                                        book.author.clone(),
+                                        book.cover_bytes.clone(),
+                                    ))
+                                    .unwrap();
+                                }
+                                tx3.send(BookUpdate::Done("thread3".to_string())).unwrap();
+                            });
+
+                            // Thread 4: Metadata extraction for pdfs
+                            let tx4 = tx.clone();
+                            thread::spawn(move || {
+                                for mut book in pdfs {
+                                    let _ = book.extract_metadata();
+                                    tx4.send(BookUpdate::Update(
+                                        book.path.clone().unwrap(),
+                                        book.title.clone(),
+                                        book.author.clone(),
+                                        book.cover_bytes.clone(),
+                                    ))
+                                    .unwrap();
+                                }
+                                tx4.send(BookUpdate::Done("thread4".to_string())).unwrap();
+                            });
+                        }
+                        Err(e) => {
+                            ui.label(format!("Error scanning: {}", e));
                         }
                     }
                 }
             }
 
-            ui.separator();
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    for book in &self.books {
-                        ui.group(|ui| {
-                            // Make the whole group clickable
-                            if ui
-                                .selectable_label(false, format!("📖 {}", book.title))
-                                .clicked()
+            // Poll metadata receiver
+            if let Some(rx) = &self.metadata_rx {
+                while let Ok(update) = rx.try_recv() {
+                    match update {
+                        BookUpdate::Update(path, title, author, cover_bytes) => {
+                            if let Some(b) = self
+                                .books
+                                .iter_mut()
+                                .find(|b| b.path.as_ref() == Some(&path))
                             {
-                                if let Some(path) = &book.path {
-                                    match open::that(path) {
-                                        Ok(()) => {
-                                            // optionally: show a small toast / label "Opening..." ?
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to open {}: {}", path.display(), e);
-                                            // TODO: show error in UI (maybe add egui toast / modal later)
+                                b.title = title;
+                                b.author = author;
+                                b.cover_bytes = cover_bytes;
+                            }
+                            ctx.request_repaint(); // Request repaint to update UI
+                        }
+                        BookUpdate::Done(thread_id) => {
+                            self.done_threads.push(thread_id);
+                            if self.done_threads.contains(&"thread3".to_string())
+                                && self.done_threads.contains(&"thread4".to_string())
+                            {
+                                // Thread 5: Ping openlibrary API for missing metadata
+                                let tx5 = self.metadata_tx.as_ref().unwrap().clone();
+                                let books_clone = self.books.clone();
+                                thread::spawn(move || {
+                                    for mut book in books_clone {
+                                        if book.author == "Unknown" || book.cover_bytes.is_none() {
+                                            let _ = book.fetch_missing_metadata();
+                                            tx5.send(BookUpdate::Update(
+                                                book.path.clone().unwrap(),
+                                                book.title.clone(),
+                                                book.author.clone(),
+                                                book.cover_bytes.clone(),
+                                            ))
+                                            .unwrap();
                                         }
                                     }
-                                } else {
-                                    // optional: handle books without path (samples)
-                                    eprintln!("No path for book: {}", book.title);
-                                }
+                                    tx5.send(BookUpdate::Done("thread5".to_string())).unwrap();
+                                });
                             }
-
-                            ui.label(format!("👤 {}", book.author));
-
-                            // optional: smaller metadata line
-                            if let Some(p) = &book.path {
-                                ui.label(
-                                    egui::RichText::new(format!("Path: {}", p.display()))
-                                        .small()
-                                        .weak(),
-                                );
-                            }
-                        });
-                        ui.add_space(8.0);
-                    }
-                });
-
-            ui.separator();
-
-            if ui.button("Select File").clicked() {
-                if let Some(path) = FileDialog::new()
-                    .add_filter("Ebook", &["epub", "json"])
-                    .pick_file()
-                {
-                    println!("Selected file: {:?}", path);
-
-                    if let Some(book) = Book::from_filename(&path) {
-                        self.books.push(book);
+                        }
                     }
                 }
             }

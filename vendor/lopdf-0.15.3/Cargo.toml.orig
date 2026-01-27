@@ -1,0 +1,23 @@
+[package]
+name = "lopdf"
+version = "0.15.3"
+authors = ["Junfeng Liu <china.liujunfeng@gmail.com>"]
+homepage = "https://github.com/J-F-Liu/lopdf"
+documentation = "https://docs.rs/crate/lopdf/"
+repository = "https://github.com/J-F-Liu/lopdf.git"
+license = "MIT"
+readme = "README.md"
+description = "A Rust library for PDF document manipulation."
+
+[dependencies]
+pom = "1.1.0"
+chrono = "0.3.0"
+flate2 = "0.2.14"
+linked-hash-map = "0.3.0"
+dtoa = "0.4.1"
+itoa = "0.3.1"
+encoding = "0.2"
+image = "0.19.0"
+
+[badges]
+travis-ci = { repository = "J-F-Liu/lopdf" }

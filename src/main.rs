@@ -1,7 +1,7 @@
 mod app;
-mod book;
+mod book;  // Book is now in book.rs
 
-use app::EbookApp;
+use app::App;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -13,7 +13,7 @@ pub fn start_app(canvas_id: &str) -> Result<(), eframe::wasm_bindgen::JsValue> {
     eframe::start_web(
         canvas_id,
         web_options,
-        Box::new(|_| Box::<EbookApp>::default()),
+        Box::new(|_| Box::<App>::default()),
     )
 }
 
@@ -23,6 +23,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "E-Book Reader",
         options,
-        Box::new(|_| Ok(Box::<EbookApp>::default())),
+        Box::new(|_| Ok(Box::<App>::default())),
     )
 }
