@@ -23,4 +23,3 @@ urlencoding = "2.1"
 anyhow = "1.0"       # For error handling
 
 once_cell = "1.19"
-lumen = "2.19.0"     # Assuming this is still needed, though not used in updates

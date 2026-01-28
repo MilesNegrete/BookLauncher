@@ -1,8 +1,6 @@
 use eframe::egui;
 use rfd::FileDialog;
-use serde::Serialize;
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -11,7 +9,6 @@ use std::thread;
 // Use the Book from book.rs
 use crate::book::Book;
 
-//#[derive(Serialize, Clone)]
 pub struct App {
     books: Vec<Book>,
     last_dir: Option<PathBuf>,
@@ -23,7 +20,7 @@ pub struct App {
 }
 
 enum BookUpdate {
-    Update(PathBuf, String, String, Option<Vec<u8>>),
+    Update(PathBuf, String, String),
     Done(String),
 }
 
@@ -42,219 +39,139 @@ impl Default for App {
 }
 
 impl App {
+    #[allow(dead_code)]
     fn add_book_from_path(&mut self, path: &Path) -> Result<(), String> {
+        println!("[DEBUG] Attempting to add book: {:?}", path);
         match Book::from_filename(path) {
             Some(book) => {
                 let already = self.books.iter().any(|b| b.path == book.path);
                 if !already {
+                    println!("[DEBUG] Successfully added: {}", book.title);
                     self.books.push(book);
                     Ok(())
                 } else {
+                    println!("[DEBUG] Duplicate book found, skipping: {:?}", path);
                     Err("That book is already in your library.".to_string())
                 }
             }
-            None => Err(format!("Couldn’t load: {}", path.display())),
+            None => {
+                println!("[DEBUG] Failed to load book from: {:?}", path);
+                Err(format!("Couldn’t load: {}", path.display()))
+            }
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        
+        // --- ASYNC DATA HANDLING DEBUG ---
+        // Check if the scan thread has finished
+        if let Some(rx) = &self.scan_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(new_books) => {
+                        println!("[DEBUG] Scan complete. Found {} books.", new_books.len());
+                        self.books.extend(new_books);
+                    }
+                    Err(e) => println!("[DEBUG] Scan error: {}", e),
+                }
+                self.scan_rx = None; // Reset the receiver
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("📚 My E-Book Library");
+
+            // UI Debug Info (Optional toggle for development)
+            #[cfg(debug_assertions)]
+            {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("DEBUG MODE").color(egui::Color32::RED).small());
+                    if ui.button("Print State to Console").clicked() {
+                        println!("[DEBUG] Current Library Count: {}", self.books.len());
+                        println!("[DEBUG] Last Directory: {:?}", self.last_dir);
+                    }
+                });
+            }
+
             ui.separator();
 
-            // Make the list scrollable
+            if self.scan_rx.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Scanning folder…");
+                });
+            }
+
+            if self.metadata_rx.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Extracting metadata…");
+                });
+            }
+
+            ui.separator();
+
+            let num_books = self.books.len();
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(ui.available_height() - 100.0) // leave room for buttons
+                .max_height(ui.available_height() - 100.0) 
                 .show(ui, |ui| {
-                    if self.books.is_empty() {
-                        ui.label("No books yet. Add some using the buttons below.");
+                    if num_books == 0 {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("No books yet.");
+                        });
                     } else {
                         for book in &self.books {
-                            ui.horizontal(|ui| {
-                                // Show cover if available
-                                if let Some(cover) = &book.cover_bytes {
-                                    let image = egui::ColorImage::from_rgba_unmultiplied([100, 140], &cover.clone());
-                                    let texture = ctx.load_texture("book_cover", image, Default::default());
-                                    ui.image(&texture);
-                                } else {
-                                    // Placeholder
-                                    ui.label("[No cover]");
-                                }
-
+                            ui.group(|ui| {
                                 ui.vertical(|ui| {
                                     ui.strong(&book.title);
-                                    ui.label(format!("by {}", book.author));
-                                    if let Some(path) = &book.path {
-                                        ui.label(path.display().to_string());
-                                    }
+                                    ui.label(egui::RichText::new(format!("by {}", book.author)).italics());
                                 });
                             });
-                            ui.separator();
+                            ui.add_space(4.0);
                         }
                     }
                 });
 
             ui.separator();
 
-            if ui.button("Scan Folder").clicked() {
-                self.open_folder_picker = true;
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Scan Folder").clicked() {
+                    println!("[DEBUG] Scan Folder button clicked");
+                    self.open_folder_picker = true;
+                }
 
+                if ui.button("Clear Library").clicked() {
+                    println!("[DEBUG] Library cleared");
+                    self.books.clear();
+                }
+            });
+
+            // Folder picker logic
             if self.open_folder_picker {
-                if let Some(folder) = FileDialog::new().pick_folder() {
+                self.open_folder_picker = false; // Reset early to avoid loop
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    println!("[DEBUG] Folder selected: {:?}", folder);
                     self.last_dir = Some(folder.clone());
-                    let (tx, rx) = mpsc::channel();
+                    
+                    let (tx, rx) = std::sync::mpsc::channel();
                     self.scan_rx = Some(rx);
+
                     let folder_clone = folder.clone();
-                    thread::spawn(move || {
-                        let result = Book::from_dir(&folder_clone);
-                        tx.send(result).unwrap();
+                    let ctx_clone = ctx.clone(); // Needed to wake up UI thread when done
+                    
+                    std::thread::spawn(move || {
+                        println!("[DEBUG] Starting background scan thread...");
+                        let result = crate::book::Book::from_dir(&folder_clone);
+                        let _ = tx.send(result);
+                        ctx_clone.request_repaint(); // Tell egui to check the receiver
+                        println!("[DEBUG] Background scan thread finished.");
                     });
-                    self.open_folder_picker = false;
-                }
-            }
-
-            // Poll scan receiver
-            if let Some(rx) = &self.scan_rx {
-                if let Ok(result) = rx.try_recv() {
-                    self.scan_rx = None; // Clear receiver
-                    match result {
-                        Ok(found_books) => {
-                            // Thread 0: Count the number of books
-                            let count = found_books.len();
-                            // Could display count in UI if desired, e.g., ui.label(format!("Found {} books", count));
-
-                            // Thread 1: Sort the books based on type (group by extension)
-                            let mut groups: HashMap<String, Vec<Book>> = HashMap::new();
-                            for mut book in found_books {
-                                let ext = book
-                                    .path
-                                    .as_ref()
-                                    .and_then(|p| p.extension())
-                                    .and_then(|s| s.to_str())
-                                    .map(|s| s.to_lowercase())
-                                    .unwrap_or("unknown".to_string());
-                                groups.entry(ext).or_insert_with(Vec::new).push(book);
-                            }
-
-                            // Thread 2: Add the books to the library
-                            for (_, bs) in &groups {
-                                for book in bs {
-                                    if !self.books.iter().any(|x| x.path == book.path) {
-                                        self.books.push(book.clone());
-                                    }
-                                }
-                            }
-                            // UI will update with new books on next frame
-
-                            // Prepare for metadata extraction threads
-                            let (tx, rx) = mpsc::channel();
-                            self.metadata_rx = Some(rx);
-                            self.metadata_tx = Some(tx.clone());
-                            self.done_threads.clear();
-
-                            // Clone groups for threads
-                            let epubs = groups.get("epub").cloned().unwrap_or_default();
-                            let mobis = groups.get("mobi").cloned().unwrap_or_default();
-                            let azw3s = groups.get("azw3").cloned().unwrap_or_default();
-                            let pdfs = groups.get("pdf").cloned().unwrap_or_default();
-
-                            // Thread 3: Metadata extraction for epubs, then mobi/azw3
-                            let tx3 = tx.clone();
-                            thread::spawn(move || {
-                                // Epubs first
-                                for mut book in epubs {
-                                    let _ = book.extract_metadata();
-                                    tx3.send(BookUpdate::Update(
-                                        book.path.clone().unwrap(),
-                                        book.title.clone(),
-                                        book.author.clone(),
-                                        book.cover_bytes.clone(),
-                                    ))
-                                    .unwrap();
-                                }
-                                // Then mobi/azw3
-                                for mut book in mobis.into_iter().chain(azw3s.into_iter()) {
-                                    let _ = book.extract_metadata();
-                                    tx3.send(BookUpdate::Update(
-                                        book.path.clone().unwrap(),
-                                        book.title.clone(),
-                                        book.author.clone(),
-                                        book.cover_bytes.clone(),
-                                    ))
-                                    .unwrap();
-                                }
-                                tx3.send(BookUpdate::Done("thread3".to_string())).unwrap();
-                            });
-
-                            // Thread 4: Metadata extraction for pdfs
-                            let tx4 = tx.clone();
-                            thread::spawn(move || {
-                                for mut book in pdfs {
-                                    let _ = book.extract_metadata();
-                                    tx4.send(BookUpdate::Update(
-                                        book.path.clone().unwrap(),
-                                        book.title.clone(),
-                                        book.author.clone(),
-                                        book.cover_bytes.clone(),
-                                    ))
-                                    .unwrap();
-                                }
-                                tx4.send(BookUpdate::Done("thread4".to_string())).unwrap();
-                            });
-                        }
-                        Err(e) => {
-                            ui.label(format!("Error scanning: {}", e));
-                        }
-                    }
-                }
-            }
-
-            // Poll metadata receiver
-            if let Some(rx) = &self.metadata_rx {
-                while let Ok(update) = rx.try_recv() {
-                    match update {
-                        BookUpdate::Update(path, title, author, cover_bytes) => {
-                            if let Some(b) = self
-                                .books
-                                .iter_mut()
-                                .find(|b| b.path.as_ref() == Some(&path))
-                            {
-                                b.title = title;
-                                b.author = author;
-                                b.cover_bytes = cover_bytes;
-                            }
-                            ctx.request_repaint(); // Request repaint to update UI
-                        }
-                        BookUpdate::Done(thread_id) => {
-                            self.done_threads.push(thread_id);
-                            if self.done_threads.contains(&"thread3".to_string())
-                                && self.done_threads.contains(&"thread4".to_string())
-                            {
-                                // Thread 5: Ping openlibrary API for missing metadata
-                                let tx5 = self.metadata_tx.as_ref().unwrap().clone();
-                                let books_clone = self.books.clone();
-                                thread::spawn(move || {
-                                    for mut book in books_clone {
-                                        if book.author == "Unknown" || book.cover_bytes.is_none() {
-                                            let _ = book.fetch_missing_metadata();
-                                            tx5.send(BookUpdate::Update(
-                                                book.path.clone().unwrap(),
-                                                book.title.clone(),
-                                                book.author.clone(),
-                                                book.cover_bytes.clone(),
-                                            ))
-                                            .unwrap();
-                                        }
-                                    }
-                                    tx5.send(BookUpdate::Done("thread5".to_string())).unwrap();
-                                });
-                            }
-                        }
-                    }
+                } else {
+                    println!("[DEBUG] Folder picker cancelled.");
                 }
             }
         });
