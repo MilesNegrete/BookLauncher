@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use std::io;
 use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Book {
@@ -10,8 +10,6 @@ pub struct Book {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
-
-
 
 impl Book {
     /// Simple convenience list so `app.rs` builds without needing the FS yet.
@@ -68,8 +66,7 @@ impl Book {
                 books.extend(Self::from_dir(&path)?);
             } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 let ext = ext.to_lowercase();
-                // Add or remove extensions as you like
-                if ["epub", "mobi", "azw3", "pdf"].contains(&ext.as_str()) {
+                if ["epub", "mobi", "azw3", "pdf", "txt", "md"].contains(&ext.as_str()) {
                     if let Some(book) = Book::from_filename(&path) {
                         books.push(book);
                     }
@@ -93,5 +90,28 @@ mod tests {
         assert_eq!(book.title, "The Lies of Locke Lamora");
         assert_eq!(book.author, "Scott Lynch");
         assert_eq!(book.path.as_ref().unwrap(), &p);
+    }
+
+    #[test]
+    fn test_from_dir_includes_reader_formats() {
+        let temp_root =
+            std::env::temp_dir().join(format!("booklauncher-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(&temp_root).unwrap();
+
+        std::fs::write(temp_root.join("Example - Writer.txt"), "hello").unwrap();
+        std::fs::write(temp_root.join("Notes - Writer.md"), "# hello").unwrap();
+        std::fs::write(temp_root.join("Ignored.tmp"), "skip").unwrap();
+
+        let mut titles = Book::from_dir(&temp_root)
+            .unwrap()
+            .into_iter()
+            .map(|book| book.title)
+            .collect::<Vec<_>>();
+        titles.sort();
+
+        assert_eq!(titles, vec!["Example", "Notes"]);
+
+        std::fs::remove_dir_all(temp_root).unwrap();
     }
 }
