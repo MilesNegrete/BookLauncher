@@ -68,8 +68,6 @@ impl Book {
                 books.extend(Self::from_dir(&path)?);
             } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 let ext = ext.to_lowercase();
-                // Add or remove extensions as you like
-                if ["epub", "mobi", "azw3", "pdf"].contains(&ext.as_str()) {
                 if ["epub", "mobi", "azw3", "pdf", "txt", "md"].contains(&ext.as_str()) {
                     if let Some(book) = Book::from_filename(&path) {
                         books.push(book);
@@ -95,5 +93,4 @@ mod tests {
         assert_eq!(book.author, "Scott Lynch");
         assert_eq!(book.path.as_ref().unwrap(), &p);
     }
-}
 }

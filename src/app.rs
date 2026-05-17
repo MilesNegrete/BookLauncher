@@ -12,6 +12,7 @@ pub struct EbookApp {
     reading_book: Option<Book>,
     reading_content: String,
     reading_error: Option<String>,
+    reader_current_page: usize,
     reader_font_size: f32,
     reader_search: String,
     show_library: bool,
@@ -25,6 +26,7 @@ struct AppConfig {
     reading_book: Option<Book>,
     reading_content: String,
     reading_error: Option<String>,
+    reader_current_page: usize,
     reader_font_size: f32,
 }
 
@@ -57,6 +59,7 @@ impl Default for EbookApp {
         let mut reading_book = None;
         let mut reading_content = String::new();
         let mut reading_error = None;
+        let mut reader_current_page = 0;
         let mut reader_font_size = 18.0;
 
         if let Ok(txt) = std::fs::read_to_string(&config_path) {
@@ -66,6 +69,7 @@ impl Default for EbookApp {
                 reading_book = cfg.reading_book;
                 reading_content = cfg.reading_content;
                 reading_error = cfg.reading_error;
+                reader_current_page = cfg.reader_current_page;
                 if cfg.reader_font_size.is_finite() && cfg.reader_font_size > 0.0 {
                     reader_font_size = cfg.reader_font_size;
                 }
@@ -88,6 +92,7 @@ impl Default for EbookApp {
             reading_book,
             reading_content,
             reading_error,
+            reader_current_page,
             reader_font_size,
             reader_search: String::new(),
             show_library: true,
@@ -103,6 +108,7 @@ impl EbookApp {
             reading_book: self.reading_book.clone(),
             reading_content: self.reading_content.clone(),
             reading_error: self.reading_error.clone(),
+            reader_current_page: self.reader_current_page,
             reader_font_size: self.reader_font_size,
         };
 
@@ -187,12 +193,79 @@ impl EbookApp {
 
     fn html_to_text(html: &str) -> String {
         let mut text = String::new();
-        let mut in_tag = false;
-        let mut previous_was_space = false;
+        let mut tag_buffer = String::new();
         let mut entity = String::new();
+        let mut in_ignored_tag: Option<String> = None;
         let mut reading_entity = false;
+        let mut inside_tag = false;
+        let mut previous_was_space = false;
+
+        fn push_space(text: &mut String, previous_was_space: &mut bool) {
+            if !*previous_was_space && !text.is_empty() {
+                text.push(' ');
+                *previous_was_space = true;
+            }
+        }
+
+        fn push_newline(text: &mut String, previous_was_space: &mut bool) {
+            if !text.ends_with('\n') && !text.is_empty() {
+                text.push('\n');
+            }
+            *previous_was_space = true;
+        }
+
+        fn normalize_tag_name(tag: &str) -> String {
+            let trimmed = tag.trim();
+            let trimmed = trimmed
+                .trim_start_matches('/')
+                .trim_end_matches('/')
+                .trim_start_matches('!')
+                .trim_start_matches('?');
+
+            trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        }
 
         for ch in html.chars() {
+            if inside_tag {
+                tag_buffer.push(ch);
+
+                if ch == '>' {
+                    inside_tag = false;
+                    let current_tag = normalize_tag_name(&tag_buffer[..tag_buffer.len() - 1]);
+                    let is_closing_tag = tag_buffer.trim_start().starts_with("</");
+
+                    match current_tag.as_str() {
+                        "style" | "script" | "head" => {
+                            if is_closing_tag {
+                                in_ignored_tag = None;
+                            } else {
+                                in_ignored_tag = Some(current_tag.clone());
+                            }
+                        }
+                        "br" | "p" | "div" | "li" | "section" | "article" | "tr"
+                        | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                            push_newline(&mut text, &mut previous_was_space);
+                        }
+                        _ => {}
+                    }
+
+                    tag_buffer.clear();
+                }
+                continue;
+            }
+
+            if in_ignored_tag.is_some() {
+                if ch == '<' {
+                    inside_tag = true;
+                    tag_buffer.clear();
+                }
+                continue;
+            }
+
             if reading_entity {
                 if ch == ';' {
                     let decoded = match entity.as_str() {
@@ -202,6 +275,11 @@ impl EbookApp {
                         "quot" => Some('"'),
                         "apos" => Some('\''),
                         "nbsp" => Some(' '),
+                        "#39" => Some('\''),
+                        "#34" => Some('"'),
+                        "#38" => Some('&'),
+                        "#60" => Some('<'),
+                        "#62" => Some('>'),
                         _ => None,
                     };
 
@@ -223,19 +301,15 @@ impl EbookApp {
 
             match ch {
                 '<' => {
-                    in_tag = true;
+                    inside_tag = true;
+                    tag_buffer.clear();
                 }
-                '>' => in_tag = false,
-                '&' if !in_tag => {
+                '&' => {
                     reading_entity = true;
                     entity.clear();
                 }
-                _ if in_tag => {}
                 _ if ch.is_whitespace() => {
-                    if !previous_was_space {
-                        text.push(' ');
-                        previous_was_space = true;
-                    }
+                    push_space(&mut text, &mut previous_was_space);
                 }
                 _ => {
                     text.push(ch);
@@ -255,6 +329,7 @@ impl EbookApp {
         self.reading_book = Some(book.clone());
         self.reading_content.clear();
         self.reading_error = None;
+        self.reader_current_page = 0;
         self.show_library = false;
 
         let Some(path) = &book.path else {
@@ -286,6 +361,13 @@ impl EbookApp {
         self.show_library = true;
     }
 
+    fn lines_per_page(&self, available_height: f32) -> usize {
+        let row_height = (self.reader_font_size + 8.0).max(16.0);
+        let reserved_height = 140.0;
+        let usable_height = (available_height - reserved_height).max(row_height * 3.0);
+        (usable_height / row_height).floor().max(1.0) as usize
+    }
+
     fn matching_lines(&self) -> Vec<(usize, &str)> {
         let query = self.reader_search.trim().to_lowercase();
 
@@ -304,6 +386,30 @@ impl EbookApp {
             .filter(|(_, line)| line.to_lowercase().contains(&query))
             .map(|(index, line)| (index + 1, line))
             .collect()
+    }
+
+    fn current_page_lines(&self, lines_per_page: usize) -> (Vec<(usize, String)>, usize) {
+        let matching_lines = self.matching_lines();
+        let page_count = Self::page_count(matching_lines.len(), lines_per_page);
+        let current_page = self.reader_current_page.min(page_count.saturating_sub(1));
+        let page_start = current_page.saturating_mul(lines_per_page);
+        let page_end = (page_start + lines_per_page).min(matching_lines.len());
+
+        let visible_lines = matching_lines[page_start..page_end]
+            .iter()
+            .map(|(line_number, line)| (*line_number, (*line).to_owned()))
+            .collect();
+
+        (visible_lines, matching_lines.len())
+    }
+
+    fn page_count(total_lines: usize, lines_per_page: usize) -> usize {
+        total_lines.max(1).div_ceil(lines_per_page.max(1))
+    }
+
+    fn clamp_reader_page(&mut self, total_lines: usize, lines_per_page: usize) {
+        let last_page = Self::page_count(total_lines, lines_per_page).saturating_sub(1);
+        self.reader_current_page = self.reader_current_page.min(last_page);
     }
 
     fn show_library_ui(&mut self, ui: &mut egui::Ui) {
@@ -364,6 +470,8 @@ impl EbookApp {
     }
 
     fn show_reader_ui(&mut self, ui: &mut egui::Ui, book: &Book) {
+        let lines_per_page = self.lines_per_page(ui.available_height());
+
         ui.horizontal(|ui| {
             if ui.button("Back to Library").clicked() {
                 self.close_reader();
@@ -383,12 +491,15 @@ impl EbookApp {
                 .changed();
 
             if changed {
+                self.clamp_reader_page(self.reading_content.lines().count(), lines_per_page);
                 self.save_config();
             }
 
             ui.separator();
             ui.label("Search");
-            ui.text_edit_singleline(&mut self.reader_search);
+            if ui.text_edit_singleline(&mut self.reader_search).changed() {
+                self.reader_current_page = 0;
+            }
         });
 
         ui.separator();
@@ -405,16 +516,58 @@ impl EbookApp {
             return;
         }
 
-        let matching_lines = self.matching_lines();
+        let total_matching_lines = self.matching_lines().len();
+        self.clamp_reader_page(total_matching_lines, lines_per_page);
+        let page_count = Self::page_count(total_matching_lines, lines_per_page);
+        let can_go_back = self.reader_current_page > 0;
+        let can_go_forward = self.reader_current_page + 1 < page_count;
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(can_go_back, egui::Button::new("Previous Page"))
+                .clicked()
+            {
+                self.reader_current_page = self.reader_current_page.saturating_sub(1);
+                self.save_config();
+            }
+
+            ui.label(format!(
+                "Page {} of {}",
+                self.reader_current_page + 1,
+                page_count
+            ));
+
+            if ui
+                .add_enabled(can_go_forward, egui::Button::new("Next Page"))
+                .clicked()
+            {
+                self.reader_current_page += 1;
+                self.save_config();
+            }
+        });
 
         if !self.reader_search.trim().is_empty() {
-            ui.label(format!("{} matching lines", matching_lines.len()));
+            ui.label(format!("{} matching lines", total_matching_lines));
+        } else {
+            ui.label(format!("{} lines per page", lines_per_page));
         }
+
+        if ui.input(|input| input.key_pressed(egui::Key::ArrowLeft)) && can_go_back {
+            self.reader_current_page = self.reader_current_page.saturating_sub(1);
+            self.save_config();
+        }
+
+        if ui.input(|input| input.key_pressed(egui::Key::ArrowRight)) && can_go_forward {
+            self.reader_current_page += 1;
+            self.save_config();
+        }
+
+        let (visible_lines, _) = self.current_page_lines(lines_per_page);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                for (line_number, line) in matching_lines {
+                for (line_number, line) in &visible_lines {
                     ui.horizontal_top(|ui| {
                         ui.add_sized(
                             [48.0, self.reader_font_size + 6.0],
@@ -422,7 +575,7 @@ impl EbookApp {
                                 egui::RichText::new(line_number.to_string())
                                     .size(12.0)
                                     .color(egui::Color32::GRAY),
-                            ),
+                                ),
                         );
                         ui.label(egui::RichText::new(line).size(self.reader_font_size));
                     });
@@ -466,5 +619,32 @@ mod tests {
         assert!(text.contains("Chapter & One"));
         assert!(text.contains("This is EPUB text inside XHTML."));
         assert!(!text.contains("<em>"));
+    }
+
+    #[test]
+    fn html_to_text_ignores_style_content() {
+        let html = r#"
+            <html>
+                <head>
+                    <style>@page { margin-bottom: 5pt; }</style>
+                </head>
+                <body>
+                    <p>Hello world.</p>
+                </body>
+            </html>
+        "#;
+
+        let text = EbookApp::html_to_text(html);
+
+        assert!(text.contains("Hello world."));
+        assert!(!text.contains("@page"));
+        assert!(!text.contains("margin-bottom"));
+    }
+
+    #[test]
+    fn page_count_rounds_up_and_never_returns_zero() {
+        assert_eq!(EbookApp::page_count(0, 20), 1);
+        assert_eq!(EbookApp::page_count(20, 20), 1);
+        assert_eq!(EbookApp::page_count(21, 20), 2);
     }
 }
