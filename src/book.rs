@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use std::io;
 use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Book {
@@ -10,8 +10,6 @@ pub struct Book {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 }
-
-
 
 impl Book {
     /// Simple convenience list so `app.rs` builds without needing the FS yet.
@@ -44,7 +42,7 @@ impl Book {
         Some(Book {
             title: title.replace('_', " "),
             author: author.replace('_', " "),
-           path: Some(path.to_path_buf()),
+            path: Some(path.to_path_buf()),
         })
     }
 
