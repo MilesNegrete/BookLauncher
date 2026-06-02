@@ -40,12 +40,27 @@ pub struct EbookApp {
     cover_textures: HashMap<String, Option<egui::TextureHandle>>,
     reader_current_page: usize,
     reader_font_size: f32,
+    reader_theme: ReaderTheme,
+    reader_margin: f32,
+    reader_line_spacing: f32,
+    reader_font: ReaderFont,
     reader_search: String,
+    epub_chapters: Vec<ChapterMarker>,
+    progress: HashMap<String, BookProgress>,
+    library_search: String,
+    library_sort: LibrarySort,
+    library_format: String,
+    editing_book: Option<EditingBook>,
+    show_diagnostics: bool,
+    dependency_status: HashMap<String, bool>,
+    pdf_zoom: f32,
+    pdf_fit: PdfFit,
+    pdf_page_jump: String,
     show_library: bool,
     confirm_clear_library: bool,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppConfig {
     library_path: Option<PathBuf>,
@@ -56,6 +71,31 @@ struct AppConfig {
     reading_error: Option<String>,
     reader_current_page: usize,
     reader_font_size: f32,
+    reader_theme: ReaderTheme,
+    reader_margin: f32,
+    reader_line_spacing: f32,
+    reader_font: ReaderFont,
+    progress: HashMap<String, BookProgress>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            library_path: None,
+            added_books: Vec::new(),
+            library_cleared: false,
+            reading_book: None,
+            reading_content: String::new(),
+            reading_error: None,
+            reader_current_page: 0,
+            reader_font_size: 18.0,
+            reader_theme: ReaderTheme::Dark,
+            reader_margin: 36.0,
+            reader_line_spacing: 8.0,
+            reader_font: ReaderFont::Proportional,
+            progress: HashMap::new(),
+        }
+    }
 }
 
 struct BookLoadResult {
@@ -64,8 +104,19 @@ struct BookLoadResult {
 }
 
 enum LoadedBook {
-    Text(String),
+    Text(TextDocument),
     Pdf(PdfDocument),
+}
+
+struct TextDocument {
+    content: String,
+    chapters: Vec<ChapterMarker>,
+}
+
+#[derive(Clone)]
+struct ChapterMarker {
+    title: String,
+    anchor: String,
 }
 
 struct PdfDocument {
@@ -115,6 +166,52 @@ struct LayoutResult {
     lines: Vec<(usize, ReaderLine)>,
 }
 
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct BookProgress {
+    page: usize,
+    total_pages: usize,
+    last_opened: u64,
+    bookmarks: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum ReaderTheme {
+    Light,
+    #[default]
+    Dark,
+    Sepia,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum ReaderFont {
+    #[default]
+    Proportional,
+    Monospace,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum LibrarySort {
+    #[default]
+    Title,
+    Author,
+    RecentlyRead,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum PdfFit {
+    #[default]
+    Page,
+    Width,
+    Manual,
+}
+
+struct EditingBook {
+    key: String,
+    title: String,
+    author: String,
+}
+
 /// Creates a default instance of `EbookApp` by loading configuration from disk.
 ///
 /// This implementation performs the following steps:
@@ -147,6 +244,11 @@ impl Default for EbookApp {
         let mut reading_error = None;
         let mut reader_current_page = 0;
         let mut reader_font_size = 18.0;
+        let mut reader_theme = ReaderTheme::Dark;
+        let mut reader_margin = 36.0;
+        let mut reader_line_spacing = 8.0;
+        let mut reader_font = ReaderFont::Proportional;
+        let mut progress = HashMap::new();
 
         if let Ok(txt) = std::fs::read_to_string(&config_path) {
             if let Ok(cfg) = serde_json::from_str::<AppConfig>(&txt) {
@@ -160,6 +262,11 @@ impl Default for EbookApp {
                 if cfg.reader_font_size.is_finite() && cfg.reader_font_size > 0.0 {
                     reader_font_size = cfg.reader_font_size;
                 }
+                reader_theme = cfg.reader_theme;
+                reader_margin = cfg.reader_margin.clamp(12.0, 120.0);
+                reader_line_spacing = cfg.reader_line_spacing.clamp(2.0, 24.0);
+                reader_font = cfg.reader_font;
+                progress = cfg.progress;
             }
         }
 
@@ -207,7 +314,22 @@ impl Default for EbookApp {
             cover_textures: HashMap::new(),
             reader_current_page,
             reader_font_size,
+            reader_theme,
+            reader_margin,
+            reader_line_spacing,
+            reader_font,
             reader_search: String::new(),
+            epub_chapters: Vec::new(),
+            progress,
+            library_search: String::new(),
+            library_sort: LibrarySort::Title,
+            library_format: "all".to_string(),
+            editing_book: None,
+            show_diagnostics: false,
+            dependency_status: HashMap::new(),
+            pdf_zoom: 1.0,
+            pdf_fit: PdfFit::Page,
+            pdf_page_jump: String::new(),
             show_library: true,
             confirm_clear_library: false,
         }
@@ -462,6 +584,11 @@ impl EbookApp {
             reading_error: self.reading_error.clone(),
             reader_current_page: self.reader_current_page,
             reader_font_size: self.reader_font_size,
+            reader_theme: self.reader_theme,
+            reader_margin: self.reader_margin,
+            reader_line_spacing: self.reader_line_spacing,
+            reader_font: self.reader_font,
+            progress: self.progress.clone(),
         };
 
         if let Some(proj) = ProjectDirs::from("", "", "BookLauncher") {
@@ -495,11 +622,21 @@ impl EbookApp {
             .as_deref()
         {
             Some("txt") | Some("md") => std::fs::read_to_string(path)
-                .map(LoadedBook::Text)
+                .map(|content| {
+                    LoadedBook::Text(TextDocument {
+                        content,
+                        chapters: Vec::new(),
+                    })
+                })
                 .map_err(|err| format!("Couldn't read file '{}': {err}", path.display())),
             Some("epub") => Self::read_epub(path).map(LoadedBook::Text),
             Some("pdf") => Self::read_pdf(path),
-            Some("mobi") | Some("azw3") => Self::read_calibre_ebook(path).map(LoadedBook::Text),
+            Some("mobi") | Some("azw3") => Self::read_calibre_ebook(path).map(|content| {
+                LoadedBook::Text(TextDocument {
+                    content,
+                    chapters: Vec::new(),
+                })
+            }),
             _ => Err("Unsupported in-app reader format.".to_string()),
         }
     }
@@ -685,12 +822,31 @@ impl EbookApp {
         }
     }
 
-    fn read_epub(path: &Path) -> Result<String, String> {
+    fn read_epub(path: &Path) -> Result<TextDocument, String> {
         let mut doc = EpubDoc::new(path)
             .map_err(|err| format!("Couldn't open EPUB '{}': {err}", path.display()))?;
         let title = doc.get_title();
         let chapter_count = doc.get_num_chapters();
         let mut content = String::new();
+        let mut chapters = Vec::new();
+        let mut toc_entries = Vec::new();
+        fn collect_toc_entries(
+            points: &[epub::doc::NavPoint],
+            entries: &mut Vec<(PathBuf, String)>,
+        ) {
+            for point in points {
+                entries.push((point.content.clone(), point.label.clone()));
+                collect_toc_entries(&point.children, entries);
+            }
+        }
+        collect_toc_entries(&doc.toc, &mut toc_entries);
+        let toc_titles = toc_entries
+            .into_iter()
+            .filter_map(|(path, label)| {
+                doc.resource_uri_to_chapter(&path)
+                    .map(|chapter| (chapter, label))
+            })
+            .collect::<HashMap<_, _>>();
 
         if let Some(title) = title {
             content.push_str(&Self::styled_text(ReaderTextStyle::Title, &title));
@@ -714,6 +870,26 @@ impl EbookApp {
             if chapter_text.trim().is_empty() {
                 continue;
             }
+            let anchor = chapter_text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches(Self::STYLE_MARKER)
+                .split_once('\t')
+                .map(|(_, text)| text)
+                .unwrap_or_else(|| chapter_text.lines().next().unwrap_or_default())
+                .trim()
+                .to_string();
+            chapters.push(ChapterMarker {
+                title: toc_titles.get(&chapter_index).cloned().unwrap_or_else(|| {
+                    if anchor.is_empty() {
+                        format!("Chapter {}", chapter_index + 1)
+                    } else {
+                        anchor.clone()
+                    }
+                }),
+                anchor,
+            });
 
             if !content.trim().is_empty() {
                 content.push_str("\n\n");
@@ -728,7 +904,7 @@ impl EbookApp {
                 path.display()
             ))
         } else {
-            Ok(content)
+            Ok(TextDocument { content, chapters })
         }
     }
 
@@ -878,6 +1054,7 @@ impl EbookApp {
     }
 
     fn start_reading(&mut self, book: &Book, repaint_ctx: egui::Context) {
+        self.save_current_progress();
         self.reading_book = Some(book.clone());
         self.reading_content = Arc::new(String::new());
         self.reading_error = None;
@@ -885,7 +1062,16 @@ impl EbookApp {
         self.pdf_document = None;
         self.pdf_page_pending = None;
         self.pdf_page_texture = None;
-        self.reader_current_page = 0;
+        self.reader_current_page = book
+            .key()
+            .and_then(|key| self.progress.get(&key))
+            .map(|progress| progress.page)
+            .unwrap_or(0);
+        self.save_current_progress();
+        self.epub_chapters.clear();
+        self.pdf_zoom = 1.0;
+        self.pdf_fit = PdfFit::Page;
+        self.pdf_page_jump.clear();
         self.show_library = false;
         self.invalidate_layout();
         self.load_generation = self.load_generation.wrapping_add(1);
@@ -924,7 +1110,177 @@ impl EbookApp {
     }
 
     fn close_reader(&mut self) {
+        self.save_current_progress();
         self.show_library = true;
+        self.save_config();
+    }
+
+    fn save_current_progress(&mut self) {
+        let Some(key) = self.reading_book.as_ref().and_then(Book::key) else {
+            return;
+        };
+        let progress = self.progress.entry(key).or_default();
+        progress.page = self.reader_current_page;
+        progress.last_opened = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+    }
+
+    fn save_page_progress(&mut self, total_pages: usize) {
+        self.save_current_progress();
+        if let Some(progress) = self
+            .reading_book
+            .as_ref()
+            .and_then(Book::key)
+            .and_then(|key| self.progress.get_mut(&key))
+        {
+            progress.total_pages = total_pages;
+        }
+        self.save_config();
+    }
+
+    fn ensure_total_pages(&mut self, total_pages: usize) {
+        let Some(key) = self.reading_book.as_ref().and_then(Book::key) else {
+            return;
+        };
+        let progress = self.progress.entry(key).or_default();
+        if progress.total_pages != total_pages {
+            progress.total_pages = total_pages;
+            self.save_config();
+        }
+    }
+
+    fn add_book(&mut self, book: Book) {
+        let key = book.key();
+        if !self.books.iter().any(|existing| existing.key() == key) {
+            self.books.push(book);
+            self.library_cleared = false;
+        }
+    }
+
+    fn refresh_library(&mut self) {
+        let Some(folder) = self.library_path.clone() else {
+            return;
+        };
+        let Ok(scanned) = Book::from_dir(&folder) else {
+            return;
+        };
+        let previous_books = self.books.clone();
+        self.books.retain(|book| {
+            book.path
+                .as_deref()
+                .is_some_and(|path| !path.starts_with(&folder))
+        });
+        for book in scanned {
+            let existing = previous_books
+                .iter()
+                .find(|existing| existing.key() == book.key())
+                .cloned()
+                .unwrap_or(book);
+            self.add_book(existing);
+        }
+        self.save_config();
+    }
+
+    fn remove_book(&mut self, key: &str) {
+        self.books.retain(|book| book.key().as_deref() != Some(key));
+        self.progress.remove(key);
+        self.save_config();
+    }
+
+    fn progress_for(&self, book: &Book) -> Option<&BookProgress> {
+        book.key().and_then(|key| self.progress.get(&key))
+    }
+
+    fn progress_percent(&self, book: &Book) -> usize {
+        self.progress_for(book)
+            .filter(|progress| progress.total_pages > 0)
+            .map(|progress| ((progress.page + 1) * 100 / progress.total_pages).min(100))
+            .unwrap_or(0)
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(key) = self.reading_book.as_ref().and_then(Book::key) else {
+            return;
+        };
+        let progress = self.progress.entry(key).or_default();
+        if let Some(index) = progress
+            .bookmarks
+            .iter()
+            .position(|page| *page == self.reader_current_page)
+        {
+            progress.bookmarks.remove(index);
+        } else {
+            progress.bookmarks.push(self.reader_current_page);
+            progress.bookmarks.sort_unstable();
+        }
+        self.save_config();
+    }
+
+    fn current_page_is_bookmarked(&self) -> bool {
+        self.reading_book
+            .as_ref()
+            .and_then(|book| self.progress_for(book))
+            .is_some_and(|progress| progress.bookmarks.contains(&self.reader_current_page))
+    }
+
+    fn show_bookmark_controls(&mut self, ui: &mut egui::Ui, total_pages: usize) {
+        if ui
+            .button(if self.current_page_is_bookmarked() {
+                "Remove Bookmark"
+            } else {
+                "Bookmark Page"
+            })
+            .clicked()
+        {
+            self.toggle_bookmark();
+        }
+
+        let bookmarks = self
+            .reading_book
+            .as_ref()
+            .and_then(|book| self.progress_for(book))
+            .map(|progress| progress.bookmarks.clone())
+            .unwrap_or_default();
+        if !bookmarks.is_empty() {
+            egui::ComboBox::from_id_salt("reader-bookmarks")
+                .selected_text("Bookmarks")
+                .show_ui(ui, |ui| {
+                    for page in bookmarks {
+                        if ui
+                            .selectable_label(false, format!("Page {}", page + 1))
+                            .clicked()
+                        {
+                            self.reader_current_page = page;
+                            self.save_page_progress(total_pages);
+                        }
+                    }
+                });
+        }
+    }
+
+    fn dependency_available(command: &str) -> bool {
+        Command::new(command)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn apply_theme(&self, ctx: &egui::Context) {
+        let visuals = match self.reader_theme {
+            ReaderTheme::Light => egui::Visuals::light(),
+            ReaderTheme::Dark => egui::Visuals::dark(),
+            ReaderTheme::Sepia => {
+                let mut visuals = egui::Visuals::light();
+                visuals.override_text_color = Some(egui::Color32::from_rgb(70, 53, 38));
+                visuals.panel_fill = egui::Color32::from_rgb(244, 236, 216);
+                visuals.window_fill = visuals.panel_fill;
+                visuals.extreme_bg_color = egui::Color32::from_rgb(255, 250, 235);
+                visuals
+            }
+        };
+        ctx.set_visuals(visuals);
     }
 
     fn invalidate_layout(&mut self) {
@@ -941,8 +1297,9 @@ impl EbookApp {
 
             self.reading_loading = false;
             match result.content {
-                Ok(LoadedBook::Text(content)) => {
-                    self.reading_content = Arc::new(content);
+                Ok(LoadedBook::Text(document)) => {
+                    self.reading_content = Arc::new(document.content);
+                    self.epub_chapters = document.chapters;
                     self.pdf_document = None;
                     self.pdf_page_pending = None;
                     self.pdf_page_texture = None;
@@ -955,6 +1312,7 @@ impl EbookApp {
                     self.pdf_document = Some(document);
                     self.pdf_page_pending = None;
                     self.pdf_page_texture = None;
+                    self.epub_chapters.clear();
                     self.reading_error = None;
                     self.invalidate_layout();
                 }
@@ -1111,14 +1469,14 @@ impl EbookApp {
     }
 
     fn lines_per_page(&self, available_height: f32) -> usize {
-        let row_height = (self.reader_font_size + 8.0).max(16.0);
+        let row_height = (self.reader_font_size + self.reader_line_spacing).max(16.0);
         let reserved_height = 140.0;
         let usable_height = (available_height - reserved_height).max(row_height * 3.0);
         (usable_height / row_height).floor().max(1.0) as usize
     }
 
     fn chars_per_line(&self, available_width: f32) -> usize {
-        let text_width = (available_width - 72.0).max(120.0);
+        let text_width = (available_width - self.reader_margin * 2.0).max(120.0);
         (text_width / (self.reader_font_size * 0.55).max(1.0))
             .floor()
             .max(12.0) as usize
@@ -1256,10 +1614,29 @@ impl EbookApp {
                     .pick_file()
                 {
                     if let Some(book) = Book::from_filename(&path) {
-                        self.books.push(book);
-                        self.library_cleared = false;
+                        self.add_book(book);
                         self.save_config();
                     }
+                }
+            }
+
+            if ui
+                .add_enabled(
+                    self.library_path.is_some(),
+                    egui::Button::new("Refresh Folder"),
+                )
+                .clicked()
+            {
+                self.refresh_library();
+            }
+
+            if ui.button("Diagnostics").clicked() {
+                self.show_diagnostics = !self.show_diagnostics;
+                if self.show_diagnostics {
+                    self.dependency_status = ["pdfinfo", "pdftoppm", "ebook-convert", "ebook-meta"]
+                        .into_iter()
+                        .map(|command| (command.to_string(), Self::dependency_available(command)))
+                        .collect();
                 }
             }
 
@@ -1283,6 +1660,9 @@ impl EbookApp {
                 self.pdf_page_texture = None;
                 self.cover_pending.clear();
                 self.cover_textures.clear();
+                self.progress.clear();
+                self.epub_chapters.clear();
+                self.editing_book = None;
                 self.load_generation = self.load_generation.wrapping_add(1);
                 self.invalidate_layout();
                 self.reader_current_page = 0;
@@ -1295,27 +1675,198 @@ impl EbookApp {
             }
         });
 
+        if self.show_diagnostics {
+            ui.group(|ui| {
+                ui.label("Optional reader dependencies");
+                for (command, purpose) in [
+                    ("pdfinfo", "PDF page counts"),
+                    ("pdftoppm", "PDF rendering and covers"),
+                    ("ebook-convert", "MOBI/AZW3 reading"),
+                    ("ebook-meta", "MOBI/AZW3 covers"),
+                ] {
+                    let available = self
+                        .dependency_status
+                        .get(command)
+                        .copied()
+                        .unwrap_or(false);
+                    ui.label(format!(
+                        "{} {command}: {purpose}",
+                        if available { "Available" } else { "Missing" }
+                    ));
+                }
+            });
+        }
+
+        if let Some(mut editing) = self.editing_book.take() {
+            let mut keep_editing = true;
+            ui.group(|ui| {
+                ui.label("Edit metadata");
+                ui.horizontal(|ui| {
+                    ui.label("Title");
+                    ui.text_edit_singleline(&mut editing.title);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Author");
+                    ui.text_edit_singleline(&mut editing.author);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Some(book) = self
+                            .books
+                            .iter_mut()
+                            .find(|book| book.key().as_deref() == Some(&editing.key))
+                        {
+                            book.title = editing.title.trim().to_string();
+                            book.author = editing.author.trim().to_string();
+                        }
+                        self.save_config();
+                        keep_editing = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_editing = false;
+                    }
+                });
+            });
+            if keep_editing {
+                self.editing_book = Some(editing);
+            }
+        }
+
         ui.separator();
+
+        let mut recent = self.books.clone();
+        recent.sort_by_key(|book| {
+            std::cmp::Reverse(
+                self.progress_for(book)
+                    .map(|progress| progress.last_opened)
+                    .unwrap_or_default(),
+            )
+        });
+        recent.retain(|book| {
+            self.progress_for(book)
+                .is_some_and(|progress| progress.last_opened > 0)
+        });
+        recent.truncate(3);
+        if !recent.is_empty() {
+            ui.label("Recently Read");
+            ui.horizontal_wrapped(|ui| {
+                for book in recent {
+                    if ui
+                        .button(format!(
+                            "Continue {} ({}%)",
+                            book.title,
+                            self.progress_percent(&book)
+                        ))
+                        .clicked()
+                    {
+                        self.start_reading(&book, ui.ctx().clone());
+                    }
+                }
+            });
+            ui.separator();
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            ui.text_edit_singleline(&mut self.library_search);
+            egui::ComboBox::from_id_salt("library-sort")
+                .selected_text(match self.library_sort {
+                    LibrarySort::Title => "Title",
+                    LibrarySort::Author => "Author",
+                    LibrarySort::RecentlyRead => "Recently Read",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.library_sort, LibrarySort::Title, "Title");
+                    ui.selectable_value(&mut self.library_sort, LibrarySort::Author, "Author");
+                    ui.selectable_value(
+                        &mut self.library_sort,
+                        LibrarySort::RecentlyRead,
+                        "Recently Read",
+                    );
+                });
+            egui::ComboBox::from_id_salt("library-format")
+                .selected_text(self.library_format.to_uppercase())
+                .show_ui(ui, |ui| {
+                    for format in ["all", "epub", "pdf", "mobi", "azw3", "txt", "md"] {
+                        ui.selectable_value(
+                            &mut self.library_format,
+                            format.to_string(),
+                            format.to_uppercase(),
+                        );
+                    }
+                });
+        });
+
+        let query = self.library_search.trim().to_lowercase();
+        let mut visible_books = self
+            .books
+            .iter()
+            .filter(|book| {
+                (self.library_format == "all" || book.format() == self.library_format)
+                    && (query.is_empty()
+                        || book.title.to_lowercase().contains(&query)
+                        || book.author.to_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        visible_books.sort_by_cached_key(|book| match self.library_sort {
+            LibrarySort::Title => book.title.to_lowercase(),
+            LibrarySort::Author => book.author.to_lowercase(),
+            LibrarySort::RecentlyRead => format!(
+                "{:020}",
+                u64::MAX
+                    - self
+                        .progress_for(book)
+                        .map(|progress| progress.last_opened)
+                        .unwrap_or_default()
+            ),
+        });
+        ui.label(format!(
+            "{} of {} books",
+            visible_books.len(),
+            self.books.len()
+        ));
 
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                for book in self.books.clone() {
+                for book in visible_books {
                     ui.group(|ui| {
                         ui.horizontal_top(|ui| {
                             self.show_book_cover(ui, &book);
                             ui.vertical(|ui| {
                                 ui.label(format!("📖 {}", book.title));
                                 ui.label(format!("👤 {}", book.author));
+                                ui.label(format!(
+                                    "{} · {}% read",
+                                    book.format().to_uppercase(),
+                                    self.progress_percent(&book)
+                                ));
 
                                 ui.horizontal(|ui| {
-                                    if ui.button("Read in App").clicked() {
+                                    if ui.button("Read in App").clicked()
+                                        || (self.progress_percent(&book) > 0
+                                            && ui.button("Continue").clicked())
+                                    {
                                         self.start_reading(&book, ui.ctx().clone());
                                     }
 
                                     if let Some(path) = &book.path {
                                         if ui.button("Open Externally").clicked() {
                                             let _ = open::that(path);
+                                        }
+                                    }
+
+                                    if let Some(key) = book.key() {
+                                        if ui.button("Edit").clicked() {
+                                            self.editing_book = Some(EditingBook {
+                                                key: key.clone(),
+                                                title: book.title.clone(),
+                                                author: book.author.clone(),
+                                            });
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            self.remove_book(&key);
                                         }
                                     }
                                 });
@@ -1376,12 +1927,63 @@ impl EbookApp {
                 self.save_config();
             }
 
+            ui.label("Margin");
+            if ui
+                .add(egui::Slider::new(&mut self.reader_margin, 12.0..=120.0))
+                .changed()
+            {
+                self.reader_current_page = 0;
+                self.save_config();
+            }
+
+            ui.label("Spacing");
+            if ui
+                .add(egui::Slider::new(&mut self.reader_line_spacing, 2.0..=24.0))
+                .changed()
+            {
+                self.reader_current_page = 0;
+                self.save_config();
+            }
+
             ui.separator();
             ui.label("Search");
             if ui.text_edit_singleline(&mut self.reader_search).changed() {
                 self.reader_current_page = 0;
             }
         });
+        let previous_theme = self.reader_theme;
+        let previous_font = self.reader_font;
+        ui.horizontal(|ui| {
+            ui.label("Theme");
+            egui::ComboBox::from_id_salt("reader-theme")
+                .selected_text(match self.reader_theme {
+                    ReaderTheme::Light => "Light",
+                    ReaderTheme::Dark => "Dark",
+                    ReaderTheme::Sepia => "Sepia",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.reader_theme, ReaderTheme::Light, "Light");
+                    ui.selectable_value(&mut self.reader_theme, ReaderTheme::Dark, "Dark");
+                    ui.selectable_value(&mut self.reader_theme, ReaderTheme::Sepia, "Sepia");
+                });
+            ui.label("Font");
+            egui::ComboBox::from_id_salt("reader-font")
+                .selected_text(match self.reader_font {
+                    ReaderFont::Proportional => "Proportional",
+                    ReaderFont::Monospace => "Monospace",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.reader_font,
+                        ReaderFont::Proportional,
+                        "Proportional",
+                    );
+                    ui.selectable_value(&mut self.reader_font, ReaderFont::Monospace, "Monospace");
+                });
+        });
+        if self.reader_theme != previous_theme || self.reader_font != previous_font {
+            self.save_config();
+        }
 
         ui.separator();
 
@@ -1394,6 +1996,9 @@ impl EbookApp {
         let total_matching_lines = self.layout_lines.len();
         self.clamp_reader_page(total_matching_lines, lines_per_page);
         let page_count = Self::page_count(total_matching_lines, lines_per_page);
+        if self.reader_search.trim().is_empty() {
+            self.ensure_total_pages(page_count);
+        }
         let can_go_back = self.reader_current_page > 0;
         let can_go_forward = self.reader_current_page + 1 < page_count;
 
@@ -1403,7 +2008,7 @@ impl EbookApp {
                 .clicked()
             {
                 self.reader_current_page = self.reader_current_page.saturating_sub(1);
-                self.save_config();
+                self.save_page_progress(page_count);
             }
 
             ui.label(format!(
@@ -1417,7 +2022,30 @@ impl EbookApp {
                 .clicked()
             {
                 self.reader_current_page += 1;
-                self.save_config();
+                self.save_page_progress(page_count);
+            }
+
+            self.show_bookmark_controls(ui, page_count);
+
+            if !self.epub_chapters.is_empty() {
+                let chapters = self.epub_chapters.clone();
+                egui::ComboBox::from_id_salt("reader-chapters")
+                    .selected_text("Chapters")
+                    .show_ui(ui, |ui| {
+                        for chapter in chapters {
+                            if ui.selectable_label(false, &chapter.title).clicked() {
+                                if let Some(line_index) =
+                                    self.layout_lines.iter().position(|(_, line)| {
+                                        line.text.contains(chapter.anchor.trim())
+                                            || chapter.anchor.contains(line.text.trim())
+                                    })
+                                {
+                                    self.reader_current_page = line_index / lines_per_page;
+                                    self.save_page_progress(page_count);
+                                }
+                            }
+                        }
+                    });
             }
         });
 
@@ -1429,12 +2057,12 @@ impl EbookApp {
 
         if ui.input(|input| input.key_pressed(egui::Key::ArrowLeft)) && can_go_back {
             self.reader_current_page = self.reader_current_page.saturating_sub(1);
-            self.save_config();
+            self.save_page_progress(page_count);
         }
 
         if ui.input(|input| input.key_pressed(egui::Key::ArrowRight)) && can_go_forward {
             self.reader_current_page += 1;
-            self.save_config();
+            self.save_page_progress(page_count);
         }
 
         let visible_lines = self.current_page_lines(lines_per_page);
@@ -1453,7 +2081,7 @@ impl EbookApp {
                             ),
                         );
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            ui.label(line.rich_text(self.reader_font_size));
+                            ui.label(line.rich_text(self.reader_font_size, self.reader_font));
                         });
                     });
                     if line.style != ReaderTextStyle::Body {
@@ -1469,6 +2097,7 @@ impl EbookApp {
             .as_ref()
             .map(|document| document.page_count)
             .unwrap_or(1);
+        self.ensure_total_pages(page_count);
         self.reader_current_page = self.reader_current_page.min(page_count.saturating_sub(1));
         let can_go_back = self.reader_current_page > 0;
         let can_go_forward = self.reader_current_page + 1 < page_count;
@@ -1479,7 +2108,7 @@ impl EbookApp {
                 .clicked()
             {
                 self.reader_current_page = self.reader_current_page.saturating_sub(1);
-                self.save_config();
+                self.save_page_progress(page_count);
             }
 
             ui.label(format!(
@@ -1493,17 +2122,42 @@ impl EbookApp {
                 .clicked()
             {
                 self.reader_current_page += 1;
-                self.save_config();
+                self.save_page_progress(page_count);
+            }
+
+            self.show_bookmark_controls(ui, page_count);
+            ui.label("Go to");
+            ui.add(egui::TextEdit::singleline(&mut self.pdf_page_jump).desired_width(48.0));
+            if ui.button("Go").clicked() {
+                if let Ok(page) = self.pdf_page_jump.trim().parse::<usize>() {
+                    self.reader_current_page = page.saturating_sub(1).min(page_count - 1);
+                    self.save_page_progress(page_count);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("PDF view");
+            ui.selectable_value(&mut self.pdf_fit, PdfFit::Page, "Fit Page");
+            ui.selectable_value(&mut self.pdf_fit, PdfFit::Width, "Fit Width");
+            ui.selectable_value(&mut self.pdf_fit, PdfFit::Manual, "Zoom");
+            if ui
+                .add_enabled(
+                    self.pdf_fit == PdfFit::Manual,
+                    egui::Slider::new(&mut self.pdf_zoom, 0.25..=3.0).suffix("x"),
+                )
+                .changed()
+            {
+                self.pdf_fit = PdfFit::Manual;
             }
         });
 
         if ui.input(|input| input.key_pressed(egui::Key::ArrowLeft)) && can_go_back {
             self.reader_current_page = self.reader_current_page.saturating_sub(1);
-            self.save_config();
+            self.save_page_progress(page_count);
         }
         if ui.input(|input| input.key_pressed(egui::Key::ArrowRight)) && can_go_forward {
             self.reader_current_page += 1;
-            self.save_config();
+            self.save_page_progress(page_count);
         }
 
         self.request_pdf_page(ui.ctx().clone());
@@ -1517,9 +2171,11 @@ impl EbookApp {
         };
         let available = ui.available_size();
         let texture_size = texture.size_vec2();
-        let scale = (available.x / texture_size.x)
-            .min(available.y / texture_size.y)
-            .min(1.0);
+        let scale = match self.pdf_fit {
+            PdfFit::Page => (available.x / texture_size.x).min(available.y / texture_size.y),
+            PdfFit::Width => available.x / texture_size.x,
+            PdfFit::Manual => self.pdf_zoom,
+        };
         let display_size = texture_size * scale;
 
         egui::ScrollArea::both()
@@ -1582,8 +2238,13 @@ impl ReaderLine {
         }
     }
 
-    fn rich_text(&self, body_size: f32) -> egui::RichText {
-        let text = egui::RichText::new(&self.text).size(self.font_size(body_size));
+    fn rich_text(&self, body_size: f32, font: ReaderFont) -> egui::RichText {
+        let text = egui::RichText::new(&self.text)
+            .size(self.font_size(body_size))
+            .family(match font {
+                ReaderFont::Proportional => egui::FontFamily::Proportional,
+                ReaderFont::Monospace => egui::FontFamily::Monospace,
+            });
         if self.style == ReaderTextStyle::Body {
             text
         } else {
@@ -1594,6 +2255,7 @@ impl ReaderLine {
 
 impl eframe::App for EbookApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_theme(ctx);
         self.poll_background_jobs(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.show_library {

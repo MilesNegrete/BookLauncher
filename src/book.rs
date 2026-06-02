@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Book {
     pub title: String,
     pub author: String,
@@ -39,11 +39,57 @@ impl Book {
             (filename_stem, "Unknown".to_string())
         };
 
-        Some(Book {
+        let mut book = Book {
             title: title.replace('_', " "),
             author: author.replace('_', " "),
             path: Some(path.to_path_buf()),
-        })
+        };
+        book.apply_embedded_metadata();
+        Some(book)
+    }
+
+    pub fn key(&self) -> Option<String> {
+        self.path
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    pub fn format(&self) -> String {
+        self.path
+            .as_deref()
+            .and_then(Path::extension)
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("unknown")
+            .to_ascii_lowercase()
+    }
+
+    fn apply_embedded_metadata(&mut self) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+            != Some("epub")
+        {
+            return;
+        }
+
+        let Ok(doc) = epub::doc::EpubDoc::new(path) else {
+            return;
+        };
+        if let Some(title) = doc.get_title().filter(|title| !title.trim().is_empty()) {
+            self.title = title;
+        }
+        if let Some(author) = doc
+            .mdata("creator")
+            .map(|metadata| metadata.value.clone())
+            .filter(|author| !author.trim().is_empty())
+        {
+            self.author = author;
+        }
     }
 
     /// Recursively scan a directory and collect all recognized book files.
@@ -74,7 +120,9 @@ impl Book {
             }
         }
 
-        Ok(books) // <-- important: return the Vec
+        books.sort_by_cached_key(|book| book.title.to_lowercase());
+        books.dedup_by(|left, right| left.path == right.path);
+        Ok(books)
     }
 }
 
@@ -90,5 +138,17 @@ mod tests {
         assert_eq!(book.title, "The Lies of Locke Lamora");
         assert_eq!(book.author, "Scott Lynch");
         assert_eq!(book.path.as_ref().unwrap(), &p);
+    }
+
+    #[test]
+    fn book_key_and_format_come_from_path() {
+        let book = Book {
+            title: "Example".to_string(),
+            author: "Author".to_string(),
+            path: Some(PathBuf::from("/books/Example.PDF")),
+        };
+
+        assert_eq!(book.key().as_deref(), Some("/books/Example.PDF"));
+        assert_eq!(book.format(), "pdf");
     }
 }
